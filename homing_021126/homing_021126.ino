@@ -7,6 +7,10 @@ const int DIR1_PIN  = 8;
 const int STEP2_PIN = 11;
 const int DIR2_PIN  = 10;
 
+// Enable (one per TMC2208) - LOW = motor on, HIGH = motor off
+const int EN_PIN_1 = 6;
+const int EN_PIN_2 = 7;
+
 // Sensor
 const int IR_PIN   = A0;
 const int DETECTED = HIGH;          // sensor reads 1 when blocked
@@ -99,8 +103,24 @@ bool clearSensor() {
   return false;   // something else is blocking the sensor
 }
 
+// ================= ENABLE =================
+void enableSteppers() {
+  digitalWrite(EN_PIN_1, LOW);
+  digitalWrite(EN_PIN_2, LOW);
+  delay(5);                         // let the drivers power up the coils
+}
+
+void disableSteppers() {
+  digitalWrite(EN_PIN_1, HIGH);
+  digitalWrite(EN_PIN_2, HIGH);
+}
+
 // ================= SETUP (runs once) =================
 void setup() {
+  pinMode(EN_PIN_1, OUTPUT);
+  pinMode(EN_PIN_2, OUTPUT);
+  enableSteppers();
+
   pinMode(STEP1_PIN, OUTPUT);
   pinMode(DIR1_PIN, OUTPUT);
   pinMode(STEP2_PIN, OUTPUT);
@@ -116,6 +136,7 @@ void setup() {
   // 1. Make sure neither hand is over the sensor
   if (!clearSensor()) {
     Serial.println("ERROR: sensor still blocked - check for obstruction");
+    disableSteppers();
     while (true);
   }
 
@@ -123,6 +144,7 @@ void setup() {
   Serial.println("Homing hand 1...");
   if (!runToSensor(STEP1_PIN)) {
     Serial.println("ERROR: hand 1 didn't reach the sensor");
+    disableSteppers();
     while (true);
   }
   moveSteps(STEP1_PIN, M1_STEPS);
@@ -131,6 +153,7 @@ void setup() {
   Serial.println("Homing hand 2...");
   if (!runToSensor(STEP2_PIN)) {
     Serial.println("ERROR: hand 2 didn't reach the sensor");
+    disableSteppers();
     while (true);
   }
   moveSteps(STEP2_PIN, M2_STEPS);
@@ -140,5 +163,6 @@ void setup() {
 
 // ================= LOOP =================
 void loop() {
-  // Nothing - homing only runs once at startup
+  // Homing is done - turn the motors off so they don't hold or get hot
+  disableSteppers();
 }
