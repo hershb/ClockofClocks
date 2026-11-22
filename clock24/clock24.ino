@@ -24,11 +24,14 @@
 //   w 1 360      full turn per hand, so every hand passes its sensor
 //   v            fast sensor sweep (~3 s): all top hands turn once together, then all
 //                bottom hands, with background and peak voltage for every sensor
+//   x            crosstalk test: each hand turns once alone; reports any other
+//                clock's sensor that fires (~35 s)
 //   t            test every hand in turn: should turn CW from UP to RIGHT
 //   t 5          test hand 5 only
 //   s            sensor monitor (any key to stop)
 //   b            box around the edge of the grid
 //   u            all hands up
+//   0 - 9        show that digit (top half on this Mega)
 //   p            start / pause the continuous pattern
 //   f            free the motors so hands can be turned by hand
 // Angles: 0 = up, 90 = right, 180 = down, 270 = left.
@@ -68,6 +71,23 @@ const float CAL_START_BOTTOM = 180;
 //                      clock:    1        2        3        4        5        6        7        8        9       10       11       12
 const float BOX_DEGREES[NUM_HANDS] = { 90,180, 270, 90,  90,270, 270,180, 180,  0, 225,225, 225,225, 180,  0,   0, 90,  90,270, 270, 90,   0,270 };
 const float UP_DEGREES[NUM_HANDS]  = { 0 };
+
+// Digits: this Mega's 12 clocks draw the top half of a digit (the other Mega
+// draws the bottom half). One row per digit, two angles (top, bottom hand) per clock.
+//                           clock:    1        2        3        4        5        6        7        8        9       10       11       12
+const int16_t DIGITS[10][NUM_HANDS] PROGMEM = {     // stored in flash, not RAM
+  /* 0 */                      { 90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,180, 180,  0, 180,  0,   0,180 },
+  /* 1 */                      { 0 },
+  /* 2 */                      { 0 },
+  /* 3 */                      { 0 },
+  /* 4 */                      { 0 },
+  /* 5 */                      { 0 },
+  /* 6 */                      { 0 },
+  /* 7 */                      { 0 },
+  /* 8 */                      { 0 },
+  /* 9 */                      { 0 },
+};
+const bool DIGIT_DEFINED[10] = { true, false, false, false, false, false, false, false, false, false };
 
 // Continuous pattern: every step turns each hand 45° (+ = CW, - = CCW).
 // Top hands CW, bottom hands CCW, so each clock's hands scissor open and shut.
@@ -529,6 +549,14 @@ void moveHandsTo(const float targetDegrees[]) {
   moveSteps(s);
 }
 
+// Moves the hands to a digit from the DIGITS table (in flash)
+void showDigit(int d) {
+  float targets[NUM_HANDS];
+  for (int m = 0; m < NUM_HANDS; m++) targets[m] = (int16_t)pgm_read_word(&DIGITS[d][m]);
+  moveHandsTo(targets);
+  disableSteppers();                // EN high once the digit is drawn - motors off
+}
+
 // Moves each hand by its own angle: + = CW, - = CCW
 void moveHandsBy(const float moveDegrees[]) {
   if (!homed) {
@@ -682,8 +710,17 @@ void sensorSweep() {
     bottomMax[p] = 0;
   }
 
+  // Detection zones: every angle range where the digital input (what homing
+  // uses) saw the sensor fire. A normal hand gives exactly one zone.
+  const int MAX_ZONES = 4;
+  static int16_t zoneStart[2][NUM_PAIRS][MAX_ZONES], zoneEnd[2][NUM_PAIRS][MAX_ZONES];
+  static uint8_t zoneCount[2][NUM_PAIRS];
+  bool inZone[NUM_PAIRS];
+
   for (int layer = 0; layer < 2; layer++) {        // 0 = top hands, 1 = bottom hands
     long s[NUM_HANDS] = { 0 };
+    for (int p = 0; p < NUM_PAIRS; p++) { zoneCount[layer][p] = 0; inZone[p] = false; }
+
     for (long done = 0; done < STEPS_PER_REV; done += WIRING_SAMPLE_STEPS) {
       for (int p = 0; p < NUM_PAIRS; p++) s[p * 2 + layer] = WIRING_SAMPLE_STEPS;
       moveStepsAt(s, WIRING_CHECK_TICK_US);
@@ -693,6 +730,13 @@ void sensorSweep() {
         if (v < minV[p]) minV[p] = v;
         float &peak = layer == 0 ? topMax[p] : bottomMax[p];
         if (v > peak) peak = v;
+
+        int16_t angle = (int16_t)(handPos[p * 2 + layer] * 360L / STEPS_PER_REV);
+        bool det = sensorDetected(p);
+        uint8_t &n = zoneCount[layer][p];
+        if (det && !inZone[p] && n < MAX_ZONES) { zoneStart[layer][p][n] = angle; zoneEnd[layer][p][n] = angle; n++; }
+        if (det && n > 0) zoneEnd[layer][p][n - 1] = angle;
+        inZone[p] = det;
       }
     }
   }
@@ -716,35 +760,154 @@ void sensorSweep() {
     Serial.println();
   }
   Serial.println("A hand needs to read above 3.0 V to be detected.");
+
+  // Where each sensor fired. Homing stops at the FIRST zone a hand reaches
+  // going CW, so any extra zone gives a wrong home from some start positions.
+  Serial.println();
+  Serial.println(homed ? "Angles where each sensor fired (0 = up, hand tip angle):"
+                       : "Angles where each sensor fired (not homed - angles only relative):");
+  for (int p = 0; p < NUM_PAIRS; p++) {
+    for (int layer = 0; layer < 2; layer++) {
+      int m = p * 2 + layer;
+      Serial.print("Clock ");
+      Serial.print(p + 1);
+      Serial.print(p + 1 < 10 ? "  " : " ");
+      Serial.print(layer == 0 ? "top    (hand " : "bottom (hand ");
+      Serial.print(m + 1);
+      Serial.print("): ");
+      uint8_t n = zoneCount[layer][p];
+      if (n == 0) Serial.print("never");
+      for (int z = 0; z < n; z++) {
+        if (z) Serial.print(", ");
+        Serial.print(zoneStart[layer][p][z]);
+        Serial.print("-");
+        Serial.print(zoneEnd[layer][p][z]);
+      }
+      if (calibrated) {
+        Serial.print("   (calibrated trigger ");
+        float trig = 360.0 - homeDegrees[m];
+        if (trig >= 360.0) trig -= 360.0;
+        Serial.print(trig, 0);
+        Serial.print(")");
+      }
+      if (n > 1) Serial.print("   <- EXTRA ZONE");
+      Serial.println();
+    }
+  }
+}
+
+// ================= CROSSTALK TEST =================
+// Turns each hand one full turn on its own while every other hand stays still,
+// and reports any OTHER clock's sensor that fires meanwhile. With correct
+// wiring only the hand's own sensor ever fires. About 35 seconds.
+void crosstalkTest() {
+  Serial.println("Crosstalk test - each hand turns once on its own. Keep your hands clear of the clock.");
+  if (homed) moveHandsTo(UP_DEGREES);       // park everything away from the sensors
+
+  bool startDet[NUM_PAIRS];
+  for (int p = 0; p < NUM_PAIRS; p++) {
+    startDet[p] = sensorDetected(p);
+    if (startDet[p]) {
+      Serial.print("Clock ");
+      Serial.print(p + 1);
+      Serial.println(" sensor already detected at the start - ignored for crosstalk");
+    }
+  }
+
+  int problems = 0;
+  unsigned long startMs = millis();
+  for (int m = 0; m < NUM_HANDS; m++) {
+    int own = m / 2;
+    bool ownSeen = false;
+    bool other[NUM_PAIRS] = { false };
+
+    // Steps just this one hand (much faster than the all-hands move routine),
+    // checking every sensor after each step. A full turn, so handPos is unchanged.
+    enableSteppers();
+    setDirection(m, true);
+    delayMicroseconds(10);
+    unsigned long lastTick = micros();
+    for (long i = 0; i < STEPS_PER_REV; i++) {
+      while (micros() - lastTick < WIRING_CHECK_TICK_US) {}
+      lastTick = micros();
+      stepHigh(m);
+      delayMicroseconds(3);
+      stepLow(m);
+      for (int p = 0; p < NUM_PAIRS; p++) {
+        if (!sensorDetected(p)) continue;
+        if (p == own) ownSeen = true;
+        else if (!startDet[p]) other[p] = true;
+      }
+    }
+
+    printHand(m);
+    Serial.print(ownSeen ? ": own sensor OK" : ": own sensor NOT seen");
+    bool cross = false;
+    for (int p = 0; p < NUM_PAIRS; p++) {
+      if (!other[p]) continue;
+      if (!cross) Serial.print("   also fired clock(s):");
+      Serial.print(" ");
+      Serial.print(p + 1);
+      cross = true;
+    }
+    if (cross) Serial.print("   <- CROSSTALK");
+    if (cross || !ownSeen) problems++;
+    Serial.println();
+  }
+  Serial.println(problems ? "Problems found - see above." : "No crosstalk - every sensor only sees its own hands.");
+  Serial.print("Took ");
+  Serial.print((millis() - startMs) / 1000.0, 1);
+  Serial.println(" s");
+  if (!HOLD_POSITION) disableSteppers();
 }
 
 // ================= SENSOR MONITOR =================
-// Prints each sensor's voltage 5 times a second, with the peak seen so far.
-// A Mega digital input reads HIGH reliably only above about 3.0 V.
+// Prints a line only when a sensor changes between detected and clear (the
+// digital reading homing uses), showing which clock changed and every clock
+// that is detected at that moment, with its voltage.
+void printDetectedList() {
+  bool any = false;
+  for (int p = 0; p < NUM_PAIRS; p++) {
+    if (!sensorDetected(p)) continue;
+    Serial.print("  ");
+    Serial.print(p + 1);
+    Serial.print("(");
+    Serial.print(readSensorVolts(p), 1);
+    Serial.print("V)");
+    any = true;
+  }
+  if (!any) Serial.print("  none");
+  Serial.println();
+}
+
 void monitorSensors() {
-  Serial.println("Sensor monitor - send any key to stop. Readings are volts (peak in brackets):");
+  Serial.println("Sensor monitor - prints only when a sensor changes. Send any key to stop.");
   while (Serial.available()) Serial.read();
 
-  float peak[NUM_PAIRS] = { 0 };
+  bool last[NUM_PAIRS];
+  for (int p = 0; p < NUM_PAIRS; p++) last[p] = sensorDetected(p);
+  Serial.print("Detected now:");
+  printDetectedList();
+
   while (!Serial.available()) {
     for (int p = 0; p < NUM_PAIRS; p++) {
-      float volts = analogRead(SENSOR_PINS[p]) * 5.0 / 1023.0;
-      if (volts > peak[p]) peak[p] = volts;
+      bool det = sensorDetected(p);
+      if (det == last[p]) continue;
+      last[p] = det;
 
+      Serial.print(millis());
+      Serial.print(" ms  clock ");
       Serial.print(p + 1);
-      Serial.print(":");
-      Serial.print(volts, 1);
-      Serial.print(sensorDetected(p) ? "*" : " ");
-      Serial.print("(");
-      Serial.print(peak[p], 1);
-      Serial.print(")  ");
-      if (p == 5) { Serial.println(); Serial.print("  "); }
+      Serial.print(" (A");
+      Serial.print(SENSOR_PINS[p] - A0);
+      Serial.print(det ? ") ON " : ") off");
+      Serial.print("   detected now:");
+      printDetectedList();
     }
-    Serial.println();
-    delay(200);
+    delay(2);
   }
   while (Serial.available()) Serial.read();
-  Serial.println("Sensor monitor stopped (* = reading as detected)");
+  Serial.println("Sensor monitor stopped");
 }
 
 // ================= PATTERN =================
@@ -774,6 +937,16 @@ void handleCommand(String line) {
 
   if (c != 'p') inPattern = false;   // other commands restart the pattern from the box
 
+  if (c >= '0' && c <= '9') {
+    int d = c - '0';
+    paused = true;
+    if (!DIGIT_DEFINED[d]) { Serial.print("Digit "); Serial.print(d); Serial.println(" not defined yet"); return; }
+    Serial.print("Digit ");
+    Serial.println(d);
+    showDigit(d);
+    return;
+  }
+
   switch (c) {
     case 'h': homeAll(); break;
     case 'c': paused = true; calibrateAll(); break;
@@ -792,6 +965,11 @@ void handleCommand(String line) {
       paused = true;
       homed = false;                // hands end up 90° on, so positions are no longer known
       wiringCheck(hand >= 1 && hand <= NUM_HANDS ? hand - 1 : 0, value > 0 ? value : 90);
+      break;
+
+    case 'x':
+      paused = true;
+      crosstalkTest();              // full turns, so hands end where they started
       break;
 
     case 'v':
@@ -835,7 +1013,7 @@ void handleCommand(String line) {
       break;
 
     default:
-      Serial.println("Commands: h c d n j w v t s b u p f (see the top of the sketch)");
+      Serial.println("Commands: h c d n j w v x t s b u p f 0-9 (see the top of the sketch)");
   }
 }
 
