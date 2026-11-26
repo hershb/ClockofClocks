@@ -26,6 +26,8 @@
 //                bottom hands, with background and peak voltage for every sensor
 //   x            crosstalk test: each hand turns once alone; reports any other
 //                clock's sensor that fires (~35 s)
+//   r 80         set the speed of the w, v and x tests (us per step, smaller =
+//                faster; homing uses STEP_DELAY_US). Not saved.
 //   t            test every hand in turn: should turn CW from UP to RIGHT
 //   t 5          test hand 5 only
 //   s            sensor monitor (any key to stop)
@@ -45,12 +47,21 @@ const int NUM_PAIRS = 12;           // clocks
 const int NUM_HANDS = NUM_PAIRS * 2;
 
 // Odd hands are the top (front) hand on each shaft
-//                    clock:   1       2       3       4       5       6       7       8       9      10      11      12
+//                    clock:   1       2       3       4       
+//                             5       6       7       8       
+//                             9      10      11      12
 // Test wiring: clocks 5<->6 and 7<->8 are swapped on the cable, and on clocks
 // 5-8 the top and bottom hands are swapped, so their pins are rearranged here
-const uint8_t STEP_PINS[NUM_HANDS] = {  3,  5,   7,  9,  11, 13,  15, 17,  31, 33,  35, 37,  23, 25,  27, 29,  53, 51,  49, 47,  45, 43,  41, 39 };
-const uint8_t DIR_PINS[NUM_HANDS]  = {  2,  4,   6,  8,  10, 12,  14, 16,  30, 32,  34, 36,  22, 24,  26, 28,  52, 50,  48, 46,  44, 42,  40, 38 };
-const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1, A2, A3, A4, A5, A8, A9, A10, A11, A12, A13 };
+//                     HAND NUMBER        1   2    3   4    5   6    7   8   9   10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
+const uint8_t STEP_PINS[NUM_HANDS]   = {  3,  5,   7,  9,  11, 13,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  45, 43,  41, 39 };
+const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  44, 42,  40, 38 };
+const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
+
+// Change pin assignment when using the shield
+//                        HAND NUMBER        1   2    3   4    5   6    7   8    9  10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
+// const uint8_t STEP_PINS[NUM_HANDS]   = {  3,  5,   7,  9,  11, 13,  15, 17,  23, 25,  27,  29,  31, 33,  35, 37,  39, 41,  43, 45,  47, 49,  51, 53 };
+// const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16,  22, 24,  26,  28,  30, 32,  34, 36,  38  40,  42, 44,  46, 48,  50, 52 };
+// const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A6, A7,  A8, A9,  A10, A11 };
 
 const int DETECTED = HIGH;          // sensor reads 1 when a hand reflects
 const int CW = LOW;                 // DIR level that turns the hands clockwise from the front
@@ -68,7 +79,7 @@ const float CAL_START_BOTTOM = 180;
 // joins on one layer and bottom hands on the other, so every line meets a
 // hand at the same height. Clocks 6 and 7 are inside the box and park at
 // 7:30 (225°).
-//                      clock:    1        2        3        4        5        6        7        8        9       10       11       12
+//                            clock:      1        2        3        4        5        6        7        8        9       10       11       12
 const float BOX_DEGREES[NUM_HANDS] = { 90,180, 270, 90,  90,270, 270,180, 180,  0, 225,225, 225,225, 180,  0,   0, 90,  90,270, 270, 90,   0,270 };
 const float UP_DEGREES[NUM_HANDS]  = { 0 };
 
@@ -77,17 +88,17 @@ const float UP_DEGREES[NUM_HANDS]  = { 0 };
 //                           clock:    1        2        3        4        5        6        7        8        9       10       11       12
 const int16_t DIGITS[10][NUM_HANDS] PROGMEM = {     // stored in flash, not RAM
   /* 0 */                      { 90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,180, 180,  0, 180,  0,   0,180 },
-  /* 1 */                      { 0 },
-  /* 2 */                      { 0 },
-  /* 3 */                      { 0 },
-  /* 4 */                      { 0 },
+  /* 1 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180 },
+  /* 2 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180 },
+  /* 3 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180 },   // top half same as 2
+  /* 4 */                      { 90,180, 270,180,  90,180, 270,180, 180,  0, 180,  0, 180,  0, 180,  0,   0,180,   0, 90,   0,270,   0,180 },
   /* 5 */                      { 0 },
   /* 6 */                      { 0 },
   /* 7 */                      { 0 },
   /* 8 */                      { 0 },
   /* 9 */                      { 0 },
 };
-const bool DIGIT_DEFINED[10] = { true, false, false, false, false, false, false, false, false, false };
+const bool DIGIT_DEFINED[10] = { true, true, true, true, true, false, false, false, false, false };
 
 // Continuous pattern: every step turns each hand 45° (+ = CW, - = CCW).
 // Top hands CW, bottom hands CCW, so each clock's hands scissor open and shut.
@@ -97,7 +108,7 @@ const float SPIN_MOVE[NUM_HANDS]   = { 45,-45,  45,-45,  45,-45,  45,-45,  45,-4
 // ================= TIMING =================
 // Homing and calibration must use the same speed, or the sensor triggers at a
 // slightly different point and the stored calibration no longer matches.
-const unsigned int STEP_DELAY_US = 50;            // homing + calibration, same as the sensor sweep (smaller = faster)
+const unsigned int STEP_DELAY_US = 200;           // homing + calibration - quietest speed (smaller = faster)
 const unsigned long TICK_US = STEP_DELAY_US * 2UL;
 
 const unsigned int PATTERN_STEP_DELAY_US = 200;   // shapes, pattern, jog and test
@@ -617,8 +628,10 @@ void testHands(int only) {
 // min/max summary for every sensor is printed at the end. Use w 1 360 so
 // every hand passes its sensor - with 90° most hands never reach it.
 // Needs no homing or calibration. Send any key to stop early.
-const unsigned int WIRING_CHECK_STEP_DELAY_US = 50;    // smaller = faster (homing uses the same)
-const unsigned long WIRING_CHECK_TICK_US = WIRING_CHECK_STEP_DELAY_US * 2UL;   // ~1.2 s per full turn
+// Speed for the w, v and x tests. Faster than homing so the tests are quick; change it while
+// running with "r <us>" to find the quietest speed (not saved).
+unsigned int testStepDelayUs = 50;                 // smaller = faster
+#define WIRING_CHECK_TICK_US (testStepDelayUs * 2UL)
 const unsigned long WIRING_CHECK_PAUSE_MS = 400;       // gap between hands
 const long WIRING_SAMPLE_STEPS = STEPS_PER_REV / 360;  // read the sensor every 1°
 
@@ -1005,6 +1018,16 @@ void handleCommand(String line) {
       Serial.println(paused ? "Pattern paused" : "Pattern running");
       break;
 
+    case 'r':
+      if (hand >= 20 && hand <= 2000) testStepDelayUs = hand;
+      else Serial.println("Usage: r <microseconds, 20-2000> - e.g. r 80");
+      Serial.print("Test speed (w, v, x): ");
+      Serial.print(testStepDelayUs);
+      Serial.print(" us per step = ");
+      Serial.print(1000000.0 / (testStepDelayUs * 2.0) * 360.0 / STEPS_PER_REV, 0);
+      Serial.println(" deg/s");
+      break;
+
     case 'f':
       paused = true;
       disableSteppers();
@@ -1013,7 +1036,7 @@ void handleCommand(String line) {
       break;
 
     default:
-      Serial.println("Commands: h c d n j w v x t s b u p f 0-9 (see the top of the sketch)");
+      Serial.println("Commands: h c d n j w v x r t s b u p f 0-9 (see the top of the sketch)");
   }
 }
 
