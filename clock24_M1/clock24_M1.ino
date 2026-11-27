@@ -45,6 +45,7 @@
 //   u            all hands up
 //   0 - 9        show that digit (on Mega 1 this also tells Mega 2 to draw the bottom half)
 //                h f u b c on Mega 1 are also passed on to Mega 2
+//   z            count 0-9, 1 s between digits (z 500 = 0.5 s); any key stops
 //   p            start / pause the continuous pattern
 //   f            free the motors so hands can be turned by hand
 // Angles: 0 = up, 90 = right, 180 = down, 270 = left.
@@ -123,17 +124,17 @@ const float UP_DEGREES[NUM_HANDS]  = { 0 };
 //                           clock:    1        2        3        4        5        6        7        8        9       10       11       12
 const int16_t DIGITS[10][NUM_HANDS] PROGMEM = {     // stored in flash, not RAM
   /* 0 */                      { 90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,180, 180,  0, 180,  0,   0,180 },
-  /* 1 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180 },
+  /* 1 */                      { 225,225, 180, 90,  90,270, 270,225, 225,  0,   0, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180 },
   /* 2 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180 },
   /* 3 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180 },   // top half same as 2
   /* 4 */                      { 90,180, 270,180,  90,180, 270,180, 180,  0, 180,  0, 180,  0, 180,  0,   0,180,   0, 90,   0,270,   0,180 },
-  /* 5 */                      { 0 },
-  /* 6 */                      { 0 },
-  /* 7 */                      { 0 },
-  /* 8 */                      { 0 },
-  /* 9 */                      { 0 },
+  /* 5 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270, 90,   0,270,   0,180,   0, 90, 270, 90, 270,180 },   // top bar, left column
+  /* 6 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270, 90,   0,270,   0,180,   0, 90, 270, 90, 270,180 },   // top half same as 5
+  /* 7 */                      {  90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180 },   // top half same as 1
+  /* 8 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,135,  90,  0, 270,  0,   0,225 },   // two holes, waist hands 18/24 angled in
+  /* 9 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,180,   0, 90,   0,270,   0,180 },   // top half same as 8
 };
-const bool DIGIT_DEFINED[10] = { true, true, true, true, true, false, false, false, false, false };
+const bool DIGIT_DEFINED[10] = { true, true, true, true, true, true, true, true, true, true };
 
 // Continuous pattern: every step turns each hand 45° (+ = CW, - = CCW).
 // Top hands CW, bottom hands CCW, so each clock's hands scissor open and shut.
@@ -597,11 +598,31 @@ void moveHandsTo(const float targetDegrees[]) {
 }
 
 // Moves the hands to a digit from the DIGITS table (in flash)
-void showDigit(int d) {
+void showDigit(int d, bool motorsOff = true) {
   float targets[NUM_HANDS];
   for (int m = 0; m < NUM_HANDS; m++) targets[m] = (int16_t)pgm_read_word(&DIGITS[d][m]);
   moveHandsTo(targets);
-  disableSteppers();                // EN high once the digit is drawn - motors off
+  if (motorsOff) disableSteppers();  // EN released once the digit is drawn - motors off
+}
+
+// Counts 0 to 9 with a pause between digits (any key stops). On Mega 1 each
+// digit is also sent to Mega 2. Mega 1 keeps EN on (LOW) for the whole count,
+// so the shared EN line only goes off at the end.
+void countUp(unsigned long pauseMs) {
+  Serial.println("Counting 0-9 - send any key to stop");
+  while (Serial.available()) Serial.read();
+  for (int d = 0; d <= 9; d++) {
+    if (!DIGIT_DEFINED[d]) continue;
+    Serial.print("Digit ");
+    Serial.println(d);
+    signalMega2Digit(d);
+    showDigit(d, false);
+    unsigned long start = millis();
+    while (millis() - start < pauseMs && !Serial.available()) {}
+    if (Serial.available()) { while (Serial.available()) Serial.read(); Serial.println("Count stopped"); break; }
+  }
+  disableSteppers();
+  Serial.println("Count done");
 }
 
 // Moves each hand by its own angle: + = CW, - = CCW
@@ -769,16 +790,24 @@ void signalMega2(float degrees) {
   sendLinkPulse(1000 + d);
 }
 
-// Mega 2: measures a pulse from Mega 1 and runs the wiring check. Pulses
-// outside 250-1750 ms (noise, a floating wire) are ignored.
+// Mega 2: pin 18 is an interrupt pin, so the pulse from Mega 1 is timed in
+// the background - even while hands are moving - and acted on once the
+// current move has finished. Lengths that mean nothing (noise) are ignored.
+volatile unsigned long linkRiseUs = 0;
+volatile long linkPendingMs = -1;     // length of the last pulse not yet acted on
+
+void linkISR() {
+  if (digitalRead(LINK_PIN) == HIGH) linkRiseUs = micros();
+  else linkPendingMs = (long)((micros() - linkRiseUs + 500UL) / 1000UL);
+}
+
 void checkLink() {
   if (BOARD_ID != 2) return;
-  static bool wasHigh = false;
-  static unsigned long riseUs = 0;
-  bool high = digitalRead(LINK_PIN) == HIGH;
-  if (high && !wasHigh) riseUs = micros();
-  if (!high && wasHigh) {
-    long ms = (long)((micros() - riseUs + 500UL) / 1000UL);
+  noInterrupts();
+  long ms = linkPendingMs;
+  linkPendingMs = -1;
+  interrupts();
+  if (ms >= 0) {
     if (ms >= 125 && ms <= 175) {                      // h f u b c
       char cmd = "hfubc"[(ms - 125) / 10];
       Serial.print("Mega 1 says: ");
@@ -801,7 +830,6 @@ void checkLink() {
       wiringCheck(0, degrees);
     }
   }
-  wasHigh = high;
 }
 
 // ================= SENSOR SWEEP =================
@@ -1170,6 +1198,11 @@ void handleCommand(String line) {
     case 'b': paused = true; Serial.println("Box"); moveHandsTo(BOX_DEGREES); break;
     case 'u': paused = true; Serial.println("All hands up"); moveHandsTo(UP_DEGREES); break;
 
+    case 'z':
+      paused = true;
+      countUp(hand > 0 ? hand : 1000);
+      break;
+
     case 'k':
       paused = true;
       if (hand < 1 || hand > NUM_HANDS) { Serial.println("Usage: k <hand 1-24>"); break; }
@@ -1259,7 +1292,7 @@ void handleCommand(String line) {
       break;
 
     default:
-      Serial.println("Commands: h c d n j w v x r t s y a k b u p f 0-9 (see the top of the sketch)");
+      Serial.println("Commands: h c d n j w v x r t s y a k z b u p f 0-9 (see the top of the sketch)");
   }
 }
 
@@ -1267,7 +1300,7 @@ void handleCommand(String line) {
 void setup() {
   pinMode(EN_PIN, INPUT_PULLUP);    // EN released (see EN_PIN)
   if (BOARD_ID == 1) { pinMode(LINK_PIN, OUTPUT); digitalWrite(LINK_PIN, LOW); }
-  else pinMode(LINK_PIN, INPUT);
+  else { pinMode(LINK_PIN, INPUT); attachInterrupt(digitalPinToInterrupt(LINK_PIN), linkISR, CHANGE); }
   disableSteppers();                // motors off until a run starts
   setupPins();
 
