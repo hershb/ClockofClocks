@@ -62,15 +62,15 @@ const int NUM_HANDS = NUM_PAIRS * 2;
 // Test wiring: clocks 5<->6 and 7<->8 are swapped on the cable, and on clocks
 // 5-8 the top and bottom hands are swapped, so their pins are rearranged here
 //                     HAND NUMBER        1   2    3   4    5   6    7   8   9   10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
-const uint8_t STEP_PINS[NUM_HANDS]   = {  3,  5,   7,  9,  11, 13,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  45, 43,  41, 39 };
-const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  44, 42,  40, 38 };
-const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
+// const uint8_t STEP_PINS[NUM_HANDS]   = {  3,  5,   7,  9,  11, 13,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  45, 43,  41, 39 };
+// const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  44, 42,  40, 38 };
+// const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
 
 // For Mega 2
 // //                     HAND NUMBER        1   2     3   4   5   6    7   8   9   10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
-// const uint8_t STEP_PINS[NUM_HANDS]   = {  9,  11,  13,  3,  5,  7,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  39, 41,  43, 45 };
-// const uint8_t DIR_PINS[NUM_HANDS]    = {  8,  10,  12,  2,  4,  6,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  38, 40,  42, 44 };
-// const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
+const uint8_t STEP_PINS[NUM_HANDS]   = {  9,  11,  13,  3,  5,  7,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  39, 41,  43, 45 };
+const uint8_t DIR_PINS[NUM_HANDS]    = {  8,  10,  12,  2,  4,  6,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  38, 40,  42, 44 };
+const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
 
 // Change pin assignment when using the shield
 //                        HAND NUMBER        1   2    3   4    5   6    7   8    9  10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
