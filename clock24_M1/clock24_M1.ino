@@ -44,28 +44,39 @@
 //   b            box around the edge of the grid
 //   u            all hands up
 //   0 - 9        show that digit (on Mega 1 this also tells Mega 2 to draw the bottom half)
-//                h f u b c on Mega 1 are also passed on to Mega 2
+//                h f u b c p o on Mega 1 are also passed on to Mega 2
+//   m            show: 0-5 (5 s each), pattern 20 s, 6-9 (5 s each), 3 times (m 1 = once)
 //   z            count 0-9, 2 s between digits (z 500 = 0.5 s); any key stops
-//   p            start / pause the continuous pattern
+//   o            pattern start position: six boxes (corners + middle pair)
+//   p            start / pause the continuous pattern (starts from the six boxes)
 //   f            free the motors so hands can be turned by hand
 // Angles: 0 = up, 90 = right, 180 = down, 270 = left.
 
 #include <EEPROM.h>
+#include <Wire.h>
 
 // ================= PINS =================
 // ================= BOARD =================
 // The display is two Megas: Mega 1 drives the top half (hands 1-24, clocks
 // 1-12), Mega 2 the bottom half (hands 25-48, clocks 13-24). Set this per board.
 const int BOARD_ID = 1;
-const int HAND_BASE  = (BOARD_ID - 1) * 24;   // added to every hand number printed
-const int CLOCK_BASE = (BOARD_ID - 1) * 12;   // added to every clock number printed
+const int HAND_BASE = (BOARD_ID - 1) * 24;   // added to every hand number printed
+const int CLOCK_BASE = (BOARD_ID - 1) * 12;  // added to every clock number printed
 // Link wire: Mega 1 pin 18 -> Mega 2 pin 18, plus a GND wire between the boards.
 // Mega 1 sends Mega 2 one HIGH pulse; its length says what to do:
 //   20, 30 ... 110 ms   show digit 0 ... 9 (sent before Mega 1 moves, so both
 //                       halves draw together)
-//   130 h  140 f  150 u  160 b  170 c   (Mega 2 runs the same command)
+//   130 h  140 f  150 u  160 b  170 c  180 p  190 o   (Mega 2 runs the same command)
 //   250 - 1750 ms       wiring check on hands 25-48, (length - 1000) degrees
 const int LINK_PIN = 18;
+
+// I2C from the ESP32 (Mega pins 20 SDA / 21 SCL, through the level shifter).
+// Only Mega 1 listens; it passes everything on to Mega 2 over the link.
+// Messages:  'D', digit 0-9   -> show that digit (the minute units)
+//            'C', letter      -> run that command, e.g. 'C','h' = home
+const uint8_t I2C_ADDRESS = 0x10;  // minute-units board
+volatile int i2cDigit = -1;        // waiting to be shown (set in the I2C interrupt)
+volatile char i2cCommand = 0;
 
 // EN is ONE wire shared by all 48 drivers and BOTH Megas' pin 19. LOW = motors on.
 // So the two Megas never fight, neither ever drives it HIGH: "on" = drive LOW,
@@ -73,19 +84,19 @@ const int LINK_PIN = 18;
 // them on, and off only once both have let go.
 const int EN_PIN = 19;
 
-const int NUM_PAIRS = 12;           // clocks
+const int NUM_PAIRS = 12;  // clocks
 const int NUM_HANDS = NUM_PAIRS * 2;
 
 // Odd hands are the top (front) hand on each shaft
-//                    clock:   1       2       3       4       
-//                             5       6       7       8       
+//                    clock:   1       2       3       4
+//                             5       6       7       8
 //                             9      10      11      12
 // Test wiring: clocks 5<->6 and 7<->8 are swapped on the cable, and on clocks
 // 5-8 the top and bottom hands are swapped, so their pins are rearranged here
 //                     HAND NUMBER        1   2    3   4    5   6    7   8   9   10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
-const uint8_t STEP_PINS[NUM_HANDS]   = {  3,  5,   7,  9,  11, 13,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  45, 43,  41, 39 };
-const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  44, 42,  40, 38 };
-const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
+const uint8_t STEP_PINS[NUM_HANDS] = { 3, 5, 7, 9, 11, 13, 15, 17, 31, 33, 35, 37, 23, 25, 27, 29, 53, 51, 49, 47, 45, 43, 41, 39 };
+const uint8_t DIR_PINS[NUM_HANDS] = { 2, 4, 6, 8, 10, 12, 14, 16, 30, 32, 34, 36, 22, 24, 26, 28, 52, 50, 48, 46, 44, 42, 40, 38 };
+const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1, A2, A3, A4, A5, A8, A9, A10, A11, A12, A13 };
 
 // For Mega 2
 // //                     HAND NUMBER        1   2     3   4   5   6    7   8   9   10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
@@ -99,15 +110,15 @@ const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10,
 // const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16,  22, 24,  26,  28,  30, 32,  34, 36,  38  40,  42, 44,  46, 48,  50, 52 };
 // const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A6, A7,  A8, A9,  A10, A11 };
 
-const int DETECTED = HIGH;          // sensor reads 1 when a hand reflects
-const int CW = LOW;                 // DIR level that turns the hands clockwise from the front
+const int DETECTED = HIGH;  // sensor reads 1 when a hand reflects
+const int CW = LOW;         // DIR level that turns the hands clockwise from the front
 
 // ================= MOTOR SETUP =================
-const long STEPS_PER_REV = 180L * 64;    // steps per turn of the hand (11,520)
+const long STEPS_PER_REV = 180L * 64;  // steps per turn of the hand (11,520)
 
 // Where each hand is set by hand before calibrating: top hands up, bottom
 // hands down, so each clock's pair forms one straight vertical line.
-const float CAL_START_TOP    = 0;
+const float CAL_START_TOP = 0;
 const float CAL_START_BOTTOM = 180;
 
 // ================= SHAPES =================
@@ -116,69 +127,80 @@ const float CAL_START_BOTTOM = 180;
 // hand at the same height. Clocks 6 and 7 are inside the box and park at
 // 7:30 (225°).
 //                            clock:      1        2        3        4        5        6        7        8        9       10       11       12
-const float BOX_DEGREES[NUM_HANDS] = { 90,180, 270, 90,  90,270, 270,180, 180,  0, 225,225, 225,225, 180,  0,   0, 90,  90,270, 270, 90,   0,270 };
-const float UP_DEGREES[NUM_HANDS]  = { 0 };
+const float BOX_DEGREES[NUM_HANDS] = { 90, 180, 270, 90, 90, 270, 270, 180, 180, 0, 225, 225, 225, 225, 180, 0, 0, 90, 90, 270, 270, 90, 0, 270 };
+const float UP_DEGREES[NUM_HANDS] = { 0 };
 
 // Digits: this Mega's 12 clocks draw the top half of a digit (the other Mega
 // draws the bottom half). One row per digit, two angles (top, bottom hand) per clock.
 //                           clock:    1        2        3        4        5        6        7        8        9       10       11       12
-const int16_t DIGITS[10][NUM_HANDS] PROGMEM = {     // stored in flash, not RAM
-  /* 0 */                      { 90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,180, 180,  0, 180,  0,   0,180 },
-  /* 1 */                      { 225,225, 180, 90,  90,270, 270,180, 225,225,   0, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180 },
-  /* 2 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180 },
-  /* 3 */                      { 90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180 },   // top half same as 2
-  /* 4 */                      { 90,180, 270,180,  90,180, 270,180, 180,  0, 180,  0, 180,  0, 180,  0,   0,180,   0, 90,   0,270,   0,180 },
-  /* 5 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0, 180, 90,  90,270, 270,  0,   0,180,   0, 90,  90,270, 270,180 },   // top bar, left column
-  /* 6 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0, 180, 90,  90,270, 270,  0,   0,180,   0, 90,  90,270, 270,180 },   // top half same as 5
-  /* 7 */                      {  90,180, 270, 90,  90,270, 270,180,  90,  0, 270, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180 },   // top half same as 1
-  /* 8 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,135,  90,  0, 270,  0,   0,225 },   // two holes, waist hands 18/24 angled in
-  /* 9 */                      {  90,180, 270, 90,  90,270, 270,180, 180,  0,  90,180, 270,180, 180,  0,   0,180,  90,  0, 270,  0,   0,180 },   // top half same as 8
+const int16_t DIGITS[10][NUM_HANDS] PROGMEM = {
+  // stored in flash, not RAM
+  /* 0 */ { 90, 180, 270, 90, 90, 270, 270, 180, 180, 0, 90, 180, 270, 180, 180, 0, 0, 180, 180, 0, 180, 0, 0, 180 },
+  /* 1 */ { 225, 225, 180, 90, 90, 270, 270, 180, 225, 225, 0, 90, 180, 270, 180, 0, 225, 225, 225, 225, 0, 180, 0, 180 },
+  /* 2 */ { 90, 180, 270, 90, 90, 270, 270, 180, 90, 0, 270, 90, 180, 270, 180, 0, 90, 180, 270, 90, 0, 270, 0, 180 },
+  /* 3 */ { 90, 180, 270, 90, 90, 270, 270, 180, 90, 0, 270, 90, 180, 270, 180, 0, 90, 180, 270, 90, 0, 270, 0, 180 },  // top half same as 2
+  /* 4 */ { 90, 180, 270, 180, 90, 180, 270, 180, 180, 0, 180, 0, 180, 0, 180, 0, 0, 180, 0, 90, 0, 270, 0, 180 },
+  /* 5 */ { 90, 180, 270, 90, 90, 270, 270, 180, 180, 0, 180, 90, 90, 270, 270, 0, 0, 180, 0, 90, 90, 270, 270, 180 },    // top bar, left column
+  /* 6 */ { 90, 180, 270, 90, 90, 270, 270, 180, 180, 0, 180, 90, 90, 270, 270, 0, 0, 180, 0, 90, 90, 270, 270, 180 },    // top half same as 5
+  /* 7 */ { 90, 180, 270, 90, 90, 270, 270, 180, 90, 0, 270, 90, 180, 270, 180, 0, 225, 225, 225, 225, 0, 180, 0, 180 },  // top half same as 1
+  /* 8 */ { 90, 180, 270, 90, 90, 270, 270, 180, 180, 0, 90, 180, 270, 180, 180, 0, 0, 135, 90, 0, 270, 0, 0, 225 },      // two holes, waist hands 18/24 angled in
+  /* 9 */ { 90, 180, 270, 90, 90, 270, 270, 180, 180, 0, 90, 180, 270, 180, 180, 0, 0, 180, 90, 0, 270, 0, 0, 180 },      // top half same as 8
 };
 const bool DIGIT_DEFINED[10] = { true, true, true, true, true, true, true, true, true, true };
 
+// Pattern start: six equal 2 x 2 boxes over the whole 4 x 6 display - one in
+// each corner and two in the middle (the middle pair straddles the two Megas).
+// Both hands of every clock point at the centre of its box, so the four
+// clocks of a box meet in the middle (135 / 225 / 45 / 315).
+//   Mega 1 rows:  top of boxes / bottom of boxes / top of middle boxes
+//   Mega 2 rows:  bottom of middle boxes / top of boxes / bottom of boxes
+//                             clock:       1        2        3        4        5        6        7        8        9       10       11       12
+const float PATTERN_START[NUM_HANDS] = { 135, 135, 225, 225, 135, 135, 225, 225, 45, 45, 315, 315, 45, 45, 315, 315, 135, 135, 225, 225, 135, 135, 225, 225 };
+
 // Continuous pattern: every step turns each hand 45° (+ = CW, - = CCW).
 // Top hands CW, bottom hands CCW, so each clock's hands scissor open and shut.
-//                      clock:    1        2        3        4        5        6        7        8        9       10       11       12
-const float SPIN_MOVE[NUM_HANDS]   = { 45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45,  45,-45 };
+//                        clock:          1        2        3        4        5        6        7        8        9       10       11       12
+const float SPIN_MOVE[NUM_HANDS] = { 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45, 45, -45 };
 
 // ================= TIMING =================
 // Homing and calibration must use the same speed, or the sensor triggers at a
 // slightly different point and the stored calibration no longer matches.
-const unsigned int STEP_DELAY_US = 200;           // homing + calibration - quietest speed (smaller = faster)
+const unsigned int STEP_DELAY_US = 200;  // homing + calibration - quietest speed (smaller = faster)
 const unsigned long TICK_US = STEP_DELAY_US * 2UL;
 
-const unsigned int PATTERN_STEP_DELAY_US = 200;   // shapes, pattern, jog and test
+const unsigned int PATTERN_STEP_DELAY_US = 200;  // shapes, jog and test
+const unsigned int SPIN_STEP_DELAY_US = 300;     // the running pattern (p) - bigger = slower
 const unsigned long PATTERN_TICK_US = PATTERN_STEP_DELAY_US * 2UL;
 
-const long HOME_MAX_STEPS = STEPS_PER_REV * 2;   // give up after 2 turns
-const long CLEAR_MARGIN   = 100;                 // extra steps past the sensor when clearing
-const long CHECK_STEPS    = STEPS_PER_REV / 4;   // 90° - if still blocked after this, it's the other hand
+const long HOME_MAX_STEPS = STEPS_PER_REV * 2;  // give up after 2 turns
+const long CLEAR_MARGIN = 100;                  // extra steps past the sensor when clearing
+const long CHECK_STEPS = STEPS_PER_REV / 4;     // 90° - if still blocked after this, it's the other hand
 
 // true = keep the motors powered after moves so hands can't drift
 const bool HOLD_POSITION = true;
 
 // ================= STATE =================
-long remaining[NUM_HANDS];          // steps left in each hand's current homing move
-long calSteps[NUM_HANDS];           // calibration: steps from the start position to the trigger
-long handPos[NUM_HANDS];            // steps CW from "up" - valid once homed
+long remaining[NUM_HANDS];  // steps left in each hand's current homing move
+long calSteps[NUM_HANDS];   // calibration: steps from the start position to the trigger
+long handPos[NUM_HANDS];    // steps CW from "up" - valid once homed
 bool homed = false;
-long moved[NUM_HANDS];              // homing: steps each hand has turned so far
-long triggerAt[NUM_HANDS];          // homing: value of moved[] when the sensor saw the hand
+long moved[NUM_HANDS];      // homing: steps each hand has turned so far
+long triggerAt[NUM_HANDS];  // homing: value of moved[] when the sensor saw the hand
 
 enum PairState : uint8_t {
   // homing
-  H_CLEAR_A,    // moving the top hand off the sensor
-  H_CLEAR_B,    // still blocked, so moving the bottom hand off
-  H_SEEK_A,     // top hand running to the sensor
-  H_LEAVE_B,    // making sure the bottom hand starts clear of the sensor
-  H_SEEK_B,     // bottom hand running to the sensor
+  H_CLEAR_A,  // moving the top hand off the sensor
+  H_CLEAR_B,  // still blocked, so moving the bottom hand off
+  H_SEEK_A,   // top hand running to the sensor
+  H_LEAVE_B,  // making sure the bottom hand starts clear of the sensor
+  H_SEEK_B,   // bottom hand running to the sensor
   // calibration
-  C_LEAVE_A,    // top hand moving off the sensor (if it starts on it)
-  C_SEEK_A,     // top hand running to the sensor, counting steps
+  C_LEAVE_A,  // top hand moving off the sensor (if it starts on it)
+  C_SEEK_A,   // top hand running to the sensor, counting steps
   C_LEAVE_B,
   C_SEEK_B,
   // both
-  S_FINISH,     // waiting for the last move to end
+  S_FINISH,  // waiting for the last move to end
   S_DONE,
   S_ERROR
 };
@@ -199,8 +221,8 @@ void setupPins() {
     pinMode(DIR_PINS[m], OUTPUT);
     stepPort[m] = portOutputRegister(digitalPinToPort(STEP_PINS[m]));
     stepMask[m] = digitalPinToBitMask(STEP_PINS[m]);
-    dirPort[m]  = portOutputRegister(digitalPinToPort(DIR_PINS[m]));
-    dirMask[m]  = digitalPinToBitMask(DIR_PINS[m]);
+    dirPort[m] = portOutputRegister(digitalPinToPort(DIR_PINS[m]));
+    dirMask[m] = digitalPinToBitMask(DIR_PINS[m]);
   }
   for (int p = 0; p < NUM_PAIRS; p++) {
     pinMode(SENSOR_PINS[p], INPUT);
@@ -209,13 +231,17 @@ void setupPins() {
   }
 }
 
-inline void stepHigh(int m) { *stepPort[m] |= stepMask[m]; }
-inline void stepLow(int m)  { *stepPort[m] &= ~stepMask[m]; }
+inline void stepHigh(int m) {
+  *stepPort[m] |= stepMask[m];
+}
+inline void stepLow(int m) {
+  *stepPort[m] &= ~stepMask[m];
+}
 
 inline void setDirection(int m, bool cw) {
   bool high = cw ? (CW == HIGH) : (CW != HIGH);
   if (high) *dirPort[m] |= dirMask[m];
-  else      *dirPort[m] &= ~dirMask[m];
+  else *dirPort[m] &= ~dirMask[m];
 }
 
 inline bool sensorDetected(int p) {
@@ -227,15 +253,15 @@ inline bool sensorDetected(int p) {
 bool steppersOn = false;
 
 void enableSteppers() {
-  if (steppersOn) return;           // already on - no delay, so back-to-back moves run smoothly
-  digitalWrite(EN_PIN, LOW);        // pull-up off first, so the pin goes straight to LOW...
-  pinMode(EN_PIN, OUTPUT);          // ...when it becomes an output
-  delay(5);                         // let the drivers power up the coils
+  if (steppersOn) return;     // already on - no delay, so back-to-back moves run smoothly
+  digitalWrite(EN_PIN, LOW);  // pull-up off first, so the pin goes straight to LOW...
+  pinMode(EN_PIN, OUTPUT);    // ...when it becomes an output
+  delay(5);                   // let the drivers power up the coils
   steppersOn = true;
 }
 
 void disableSteppers() {
-  pinMode(EN_PIN, INPUT_PULLUP);    // let go - never drive HIGH (the other Mega may be driving LOW)
+  pinMode(EN_PIN, INPUT_PULLUP);  // let go - never drive HIGH (the other Mega may be driving LOW)
   steppersOn = false;
 }
 
@@ -243,7 +269,9 @@ long degreesToSteps(float degrees) {
   return (long)(STEPS_PER_REV * degrees / 360.0 + 0.5);
 }
 
-bool isTopHand(int m) { return m % 2 == 0; }
+bool isTopHand(int m) {
+  return m % 2 == 0;
+}
 
 void printHand(int m) {
   Serial.print("Hand ");
@@ -258,7 +286,7 @@ void printHand(int m) {
 float homeDegrees[NUM_HANDS];
 bool calibrated = false;
 
-const uint32_t CAL_MAGIC = 0xC10C2401;   // changes if the stored layout changes
+const uint32_t CAL_MAGIC = 0xC10C2401;  // changes if the stored layout changes
 struct CalData {
   uint32_t magic;
   float homeDegrees[NUM_HANDS];
@@ -308,12 +336,12 @@ void fail(int p, const char *msg) {
 
 // Advances one clock by at most one step
 void pairTick(int p) {
-  int a = p * 2;                    // top hand
-  int b = p * 2 + 1;                // bottom hand
+  int a = p * 2;      // top hand
+  int b = p * 2 + 1;  // bottom hand
   PairState st = pairState[p];
 
   if (st == S_DONE || st == S_ERROR) return;
-  if (remaining[a] > 0 || remaining[b] > 0) return;   // let the current move finish
+  if (remaining[a] > 0 || remaining[b] > 0) return;  // let the current move finish
 
   bool det = sensorDetected(p);
   long &cnt = pairCount[p];
@@ -321,20 +349,27 @@ void pairTick(int p) {
   switch (st) {
     // ---------- homing ----------
     case H_CLEAR_A:
-      if (!det) { remaining[a] = CLEAR_MARGIN; nextState(p, H_SEEK_A); }
-      else if (++cnt <= CHECK_STEPS) remaining[a] = 1;
+      if (!det) {
+        remaining[a] = CLEAR_MARGIN;
+        nextState(p, H_SEEK_A);
+      } else if (++cnt <= CHECK_STEPS) remaining[a] = 1;
       else nextState(p, H_CLEAR_B);
       break;
 
     case H_CLEAR_B:
-      if (!det) { remaining[b] = CLEAR_MARGIN; nextState(p, H_SEEK_A); }
-      else if (++cnt <= HOME_MAX_STEPS) remaining[b] = 1;
+      if (!det) {
+        remaining[b] = CLEAR_MARGIN;
+        nextState(p, H_SEEK_A);
+      } else if (++cnt <= HOME_MAX_STEPS) remaining[b] = 1;
       else fail(p, "sensor still blocked - check for obstruction or bright light");
       break;
 
     case H_SEEK_A:
-      if (det) { triggerAt[a] = moved[a]; remaining[a] = degreesToSteps(homeDegrees[a]); nextState(p, H_LEAVE_B); }
-      else if (++cnt <= HOME_MAX_STEPS) remaining[a] = 1;
+      if (det) {
+        triggerAt[a] = moved[a];
+        remaining[a] = degreesToSteps(homeDegrees[a]);
+        nextState(p, H_LEAVE_B);
+      } else if (++cnt <= HOME_MAX_STEPS) remaining[a] = 1;
       else fail(p, "top hand didn't reach the sensor");
       break;
 
@@ -345,8 +380,11 @@ void pairTick(int p) {
       break;
 
     case H_SEEK_B:
-      if (det) { triggerAt[b] = moved[b]; remaining[b] = degreesToSteps(homeDegrees[b]); nextState(p, S_FINISH); }
-      else if (++cnt <= HOME_MAX_STEPS) remaining[b] = 1;
+      if (det) {
+        triggerAt[b] = moved[b];
+        remaining[b] = degreesToSteps(homeDegrees[b]);
+        nextState(p, S_FINISH);
+      } else if (++cnt <= HOME_MAX_STEPS) remaining[b] = 1;
       else fail(p, "bottom hand didn't reach the sensor");
       break;
 
@@ -359,10 +397,9 @@ void pairTick(int p) {
 
     case C_SEEK_A:
       if (det) {
-        remaining[a] = STEPS_PER_REV - calSteps[a];   // finish the turn, back to the start
+        remaining[a] = STEPS_PER_REV - calSteps[a];  // finish the turn, back to the start
         nextState(p, C_LEAVE_B);
-      }
-      else if (++calSteps[a] < STEPS_PER_REV) remaining[a] = 1;
+      } else if (++calSteps[a] < STEPS_PER_REV) remaining[a] = 1;
       else fail(p, "top hand didn't reach the sensor in one turn");
       break;
 
@@ -376,8 +413,7 @@ void pairTick(int p) {
       if (det) {
         remaining[b] = STEPS_PER_REV - calSteps[b];
         nextState(p, S_FINISH);
-      }
-      else if (++calSteps[b] < STEPS_PER_REV) remaining[b] = 1;
+      } else if (++calSteps[b] < STEPS_PER_REV) remaining[b] = 1;
       else fail(p, "bottom hand didn't reach the sensor in one turn");
       break;
 
@@ -475,7 +511,10 @@ void printHomingCheck(const long startPos[]) {
     Serial.print(actual * 360.0 / STEPS_PER_REV, 1);
     Serial.print("    ");
     Serial.print(diffDeg, 1);
-    if (fabs(diffDeg) > 2.0) { Serial.print("   <- WRONG"); bad++; }
+    if (fabs(diffDeg) > 2.0) {
+      Serial.print("   <- WRONG");
+      bad++;
+    }
     Serial.println();
   }
   if (bad == 0) Serial.println("All sensors fired where expected.");
@@ -619,7 +658,11 @@ void countUp(unsigned long pauseMs) {
     showDigit(d, false);
     unsigned long start = millis();
     while (millis() - start < pauseMs && !Serial.available()) {}
-    if (Serial.available()) { while (Serial.available()) Serial.read(); Serial.println("Count stopped"); break; }
+    if (Serial.available()) {
+      while (Serial.available()) Serial.read();
+      Serial.println("Count stopped");
+      break;
+    }
   }
   disableSteppers();
   Serial.println("Count done");
@@ -635,7 +678,7 @@ void moveHandsBy(const float moveDegrees[]) {
   for (int m = 0; m < NUM_HANDS; m++) {
     s[m] = degreesToSteps(fabs(moveDegrees[m])) * (moveDegrees[m] < 0 ? -1 : 1);
   }
-  moveSteps(s);
+  moveStepsAt(s, SPIN_STEP_DELAY_US * 2UL);  // only the pattern uses this - at pattern speed
 }
 
 // Moves one hand by an angle. Works before homing, e.g. to line hands up for calibration.
@@ -687,7 +730,7 @@ void testHands(int only) {
 // Needs no homing or calibration. Send any key to stop early.
 // Speed for the w, v and x tests. Faster than homing so the tests are quick; change it while
 // running with "r <us>" to find the quietest speed (not saved).
-unsigned int testStepDelayUs = 50;                 // smaller = faster
+unsigned int testStepDelayUs = 50;  // smaller = faster
 #define WIRING_CHECK_TICK_US (testStepDelayUs * 2UL)
 const unsigned long WIRING_CHECK_PAUSE_MS = 400;       // gap between hands
 const long WIRING_SAMPLE_STEPS = STEPS_PER_REV / 360;  // read the sensor every 1°
@@ -703,7 +746,7 @@ void printSensorSummary() {
   Serial.println("Sensor summary (volts while each clock's hands were turning):");
   Serial.println("Clock  Pin   Min    Max");
   for (int p = 0; p < NUM_PAIRS; p++) {
-    if (sensorMax[p] < 0) continue;   // clock not tested
+    if (sensorMax[p] < 0) continue;  // clock not tested
     Serial.print(p + 1 + CLOCK_BASE < 10 ? "  " : " ");
     Serial.print(p + 1 + CLOCK_BASE);
     Serial.print("    A");
@@ -718,7 +761,7 @@ void printSensorSummary() {
   }
 }
 
-bool wiringCheck(int first, float degrees) {   // false if stopped by a key
+bool wiringCheck(int first, float degrees) {  // false if stopped by a key
   Serial.print("Wiring check - each hand turns ");
   Serial.print(fabs(degrees), 0);
   Serial.println(degrees < 0 ? " CCW in turn. Send any key to stop." : " CW in turn. Send any key to stop.");
@@ -794,7 +837,7 @@ void signalMega2(float degrees) {
 // the background - even while hands are moving - and acted on once the
 // current move has finished. Lengths that mean nothing (noise) are ignored.
 volatile unsigned long linkRiseUs = 0;
-volatile long linkPendingMs = -1;     // length of the last pulse not yet acted on
+volatile long linkPendingMs = -1;  // length of the last pulse not yet acted on
 
 void linkISR() {
   if (digitalRead(LINK_PIN) == HIGH) linkRiseUs = micros();
@@ -808,25 +851,22 @@ void checkLink() {
   linkPendingMs = -1;
   interrupts();
   if (ms >= 0) {
-    if (ms >= 125 && ms <= 175) {                      // h f u b c
-      char cmd = "hfubc"[(ms - 125) / 10];
+    if (ms >= 125 && ms <= 195) {  // h f u b c p o
+      char cmd = "hfubcpo"[(ms - 125) / 10];
       Serial.print("Mega 1 says: ");
       Serial.println(cmd);
       handleCommand(String(cmd));
-    }
-    else if (ms >= 15 && ms < 125) {                   // digit
+    } else if (ms >= 15 && ms < 125) {  // digit
       int d = (ms - 15) / 10;
       Serial.print("Mega 1 says: digit ");
       Serial.println(d);
-      if (DIGIT_DEFINED[d]) showDigit(d);
-      else Serial.println("  not defined yet on this Mega");
-    }
-    else if (ms >= 250 && ms <= 1750 && ms != 1000) {
+      handleCommand(String((char)('0' + d)));  // same as typing it: also stops a running pattern
+    } else if (ms >= 250 && ms <= 1750 && ms != 1000) {
       float degrees = ms - 1000;
       Serial.print("Mega 1 says: wiring check on hands 25-48, ");
       Serial.print(degrees, 0);
       Serial.println(" deg");
-      homed = false;                // positions no longer known (pattern stays off until h)
+      homed = false;  // positions no longer known (pattern stays off until h)
       wiringCheck(0, degrees);
     }
   }
@@ -851,12 +891,16 @@ void sensorSweep() {
   const int MAX_ZONES = 4;
   static int16_t zoneStart[2][NUM_PAIRS][MAX_ZONES], zoneEnd[2][NUM_PAIRS][MAX_ZONES];
   static uint8_t zoneCount[2][NUM_PAIRS];
-  static bool everClear[2][NUM_PAIRS];          // false = sensor stayed ON for the whole turn
+  static bool everClear[2][NUM_PAIRS];  // false = sensor stayed ON for the whole turn
   bool inZone[NUM_PAIRS];
 
-  for (int layer = 0; layer < 2; layer++) {        // 0 = top hands, 1 = bottom hands
+  for (int layer = 0; layer < 2; layer++) {  // 0 = top hands, 1 = bottom hands
     long s[NUM_HANDS] = { 0 };
-    for (int p = 0; p < NUM_PAIRS; p++) { zoneCount[layer][p] = 0; inZone[p] = false; everClear[layer][p] = false; }
+    for (int p = 0; p < NUM_PAIRS; p++) {
+      zoneCount[layer][p] = 0;
+      inZone[p] = false;
+      everClear[layer][p] = false;
+    }
 
     for (long done = 0; done < STEPS_PER_REV; done += WIRING_SAMPLE_STEPS) {
       for (int p = 0; p < NUM_PAIRS; p++) s[p * 2 + layer] = WIRING_SAMPLE_STEPS;
@@ -872,7 +916,11 @@ void sensorSweep() {
         bool det = sensorDetected(p);
         if (!det) everClear[layer][p] = true;
         uint8_t &n = zoneCount[layer][p];
-        if (det && !inZone[p] && n < MAX_ZONES) { zoneStart[layer][p][n] = angle; zoneEnd[layer][p][n] = angle; n++; }
+        if (det && !inZone[p] && n < MAX_ZONES) {
+          zoneStart[layer][p][n] = angle;
+          zoneEnd[layer][p][n] = angle;
+          n++;
+        }
         if (det && n > 0) zoneEnd[layer][p][n - 1] = angle;
         inZone[p] = det;
       }
@@ -892,9 +940,9 @@ void sensorSweep() {
     Serial.print(topMax[p], 2);
     Serial.print("     ");
     Serial.print(bottomMax[p], 2);
-    if (topMax[p] < 3.0)    Serial.print("   <- top hand not seen");
+    if (topMax[p] < 3.0) Serial.print("   <- top hand not seen");
     if (bottomMax[p] < 3.0) Serial.print("   <- bottom hand not seen");
-    if (minV[p] > 1.0)      Serial.print("   <- high background: stray light or wiring?");
+    if (minV[p] > 1.0) Serial.print("   <- high background: stray light or wiring?");
     Serial.println();
   }
   Serial.println("A hand needs to read above 3.0 V to be detected.");
@@ -915,7 +963,10 @@ void sensorSweep() {
       Serial.print("): ");
       uint8_t n = zoneCount[layer][p];
       if (n == 0) Serial.print("never");
-      if (n > 0 && !everClear[layer][p]) { Serial.print("ON the whole turn - sensor never cleared (stuck high: light or wiring)"); n = 0; }
+      if (n > 0 && !everClear[layer][p]) {
+        Serial.print("ON the whole turn - sensor never cleared (stuck high: light or wiring)");
+        n = 0;
+      }
       for (int z = 0; z < n; z++) {
         if (z) Serial.print(", ");
         Serial.print(zoneStart[layer][p][z]);
@@ -965,7 +1016,7 @@ void alternateTest(float degrees) {
   Serial.print("Alternate test - odd hands (tops) ");
   Serial.print(degrees, 0);
   Serial.println(" deg CCW, even hands (bottoms) CW...");
-  for (int m = 0; m < NUM_HANDS; m++) s[m] = (m % 2 == 0) ? -n : n;   // m 0 = hand 1 (odd)
+  for (int m = 0; m < NUM_HANDS; m++) s[m] = (m % 2 == 0) ? -n : n;  // m 0 = hand 1 (odd)
   moveStepsAt(s, PATTERN_TICK_US);
   delay(1000);
   Serial.println("...now back: odd hands CW, even hands CCW");
@@ -989,7 +1040,7 @@ void dirFinder(int m) {
   enableSteppers();
   long n = degreesToSteps(20);
   for (int k = 0; k < NUM_HANDS; k++) {
-    for (int j = 0; j < NUM_HANDS; j++) setDirection(j, j != k);   // only DIR k = CCW
+    for (int j = 0; j < NUM_HANDS; j++) setDirection(j, j != k);  // only DIR k = CCW
     delayMicroseconds(20);
     Serial.print("  only DIR pin ");
     Serial.print(DIR_PINS[k]);
@@ -1005,7 +1056,11 @@ void dirFinder(int m) {
       stepLow(m);
     }
     delay(1500);
-    if (Serial.available()) { while (Serial.available()) Serial.read(); Serial.println("DIR finder stopped"); break; }
+    if (Serial.available()) {
+      while (Serial.available()) Serial.read();
+      Serial.println("DIR finder stopped");
+      break;
+    }
   }
   Serial.println("DIR finder done - home again (h) before using shapes");
   if (!HOLD_POSITION) disableSteppers();
@@ -1017,7 +1072,7 @@ void dirFinder(int m) {
 // wiring only the hand's own sensor ever fires. About 35 seconds.
 void crosstalkTest() {
   Serial.println("Crosstalk test - each hand turns once on its own. Keep your hands clear of the clock.");
-  if (homed) moveHandsTo(UP_DEGREES);       // park everything away from the sensors
+  if (homed) moveHandsTo(UP_DEGREES);  // park everything away from the sensors
 
   bool startDet[NUM_PAIRS];
   for (int p = 0; p < NUM_PAIRS; p++) {
@@ -1037,7 +1092,7 @@ void crosstalkTest() {
     int own = m / 2;
     bool ownSeen = false, ownCleared = false;
     bool other[NUM_PAIRS] = { false };
-    float ownMin = 99, ownMax = 0;        // own sensor voltage range during the turn
+    float ownMin = 99, ownMax = 0;  // own sensor voltage range during the turn
 
     // Steps just this one hand (much faster than the all-hands move routine),
     // checking every sensor after each step. A full turn, so handPos is unchanged.
@@ -1051,13 +1106,16 @@ void crosstalkTest() {
       stepHigh(m);
       delayMicroseconds(3);
       stepLow(m);
-      if ((i & 15) == 0) {                // analog read is slow - sample every 16 steps (0.5 deg)
+      if ((i & 15) == 0) {  // analog read is slow - sample every 16 steps (0.5 deg)
         float v = readSensorVolts(own);
         if (v < ownMin) ownMin = v;
         if (v > ownMax) ownMax = v;
       }
       for (int p = 0; p < NUM_PAIRS; p++) {
-        if (!sensorDetected(p)) { if (p == own) ownCleared = true; continue; }
+        if (!sensorDetected(p)) {
+          if (p == own) ownCleared = true;
+          continue;
+        }
         if (p == own) ownSeen = true;
         else if (!startDet[p]) other[p] = true;
       }
@@ -1065,9 +1123,9 @@ void crosstalkTest() {
 
     printHand(m);
     bool ownOK = ownSeen && ownCleared;
-    if (!ownSeen)        Serial.print(": own sensor NOT seen  ");
+    if (!ownSeen) Serial.print(": own sensor NOT seen  ");
     else if (!ownCleared) Serial.print(": own sensor NEVER CLEARED (stuck high)");
-    else                 Serial.print(": own sensor OK        ");
+    else Serial.print(": own sensor OK        ");
     Serial.print("   ");
     Serial.print(ownMin, 2);
     Serial.print(" - ");
@@ -1143,15 +1201,82 @@ void monitorSensors() {
 }
 
 // ================= PATTERN =================
-bool paused = true;                 // start paused - type p to run the pattern
-bool inPattern = false;             // true once the hands have been put in the box
+bool paused = true;      // start paused - type p to run the pattern
+bool inPattern = false;  // true once the hands have been put in the box
 
 void patternStep() {
   if (!inPattern) {
-    moveHandsTo(BOX_DEGREES);
+    moveHandsTo(PATTERN_START);
     inPattern = true;
   }
   moveHandsBy(SPIN_MOVE);
+}
+
+// ================= SHOW MODE (m) =================
+// Run on Mega 1: count 0-5 (5 s each), run the pattern for 20 s, count 6-9
+// (5 s each), and repeat - 3 times by default. Mega 2 follows over the link
+// (digits, and p to start its half of the pattern). Any key stops.
+const unsigned long SHOW_DIGIT_MS = 5000;
+const unsigned long SHOW_PATTERN_MS = 20000;
+
+bool keyPressed() {
+  if (!Serial.available()) return false;
+  while (Serial.available()) Serial.read();
+  return true;
+}
+
+bool showWait(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms)
+    if (keyPressed()) return false;
+  return true;
+}
+
+bool showDigits(int from, int to) {
+  for (int d = from; d <= to; d++) {
+    if (!DIGIT_DEFINED[d]) continue;
+    Serial.print("  digit ");
+    Serial.println(d);
+    signalMega2Digit(d);
+    showDigit(d, false);  // keep the motors on for the whole show
+    if (!showWait(SHOW_DIGIT_MS)) return false;
+  }
+  return true;
+}
+
+bool showPattern() {
+  Serial.println("  pattern");
+  if (BOARD_ID == 1) sendLinkPulse(180);  // Mega 2: p (its digit left it paused, so this starts it)
+  inPattern = false;                      // start from the six boxes
+  unsigned long start = millis();
+  while (millis() - start < SHOW_PATTERN_MS) {
+    patternStep();
+    if (keyPressed()) {
+      if (BOARD_ID == 1) sendLinkPulse(180);  // p again pauses Mega 2's pattern
+      return false;
+    }
+  }
+  return true;  // the next digit stops Mega 2's pattern
+}
+
+void showMode(int cycles) {
+  if (!homed) {
+    Serial.println("Not homed - type h first");
+    return;
+  }
+  Serial.print("Show mode - ");
+  Serial.print(cycles);
+  Serial.println(" times: 0-5, pattern, 6-9. Send any key to stop.");
+  while (Serial.available()) Serial.read();
+  bool ok = true;
+  for (int c = 1; c <= cycles && ok; c++) {
+    Serial.print("Cycle ");
+    Serial.println(c);
+    ok = showDigits(0, 5) && showPattern() && showDigits(6, 9);
+  }
+  Serial.println(ok ? "Show done" : "Show stopped");
+  paused = true;
+  disableSteppers();
 }
 
 // ================= COMMANDS =================
@@ -1164,39 +1289,69 @@ void handleCommand(String line) {
   String args = line.substring(1);
   args.trim();
   int space = args.indexOf(' ');
-  int hand = args.length() ? args.toInt() : 0;                     // first number (1-24)
-  float value = space > 0 ? args.substring(space + 1).toFloat() : 0;   // second number
+  int hand = args.length() ? args.toInt() : 0;                        // first number (1-24)
+  float value = space > 0 ? args.substring(space + 1).toFloat() : 0;  // second number
 
   // On Mega 2, hand numbers 25-48 mean its local hands 1-24
   if (HAND_BASE && strchr("jntkw", c) && hand > HAND_BASE) hand -= HAND_BASE;
 
-  if (c != 'p') inPattern = false;   // other commands restart the pattern from the box
+  if (c != 'p') inPattern = false;  // other commands restart the pattern from the box
 
   if (c >= '0' && c <= '9') {
     int d = c - '0';
     paused = true;
-    if (!DIGIT_DEFINED[d]) { Serial.print("Digit "); Serial.print(d); Serial.println(" not defined yet"); return; }
+    if (!DIGIT_DEFINED[d]) {
+      Serial.print("Digit ");
+      Serial.print(d);
+      Serial.println(" not defined yet");
+      return;
+    }
     Serial.print("Digit ");
     Serial.println(d);
-    signalMega2Digit(d);            // Mega 1: tell Mega 2 to draw the bottom half
+    signalMega2Digit(d);  // Mega 1: tell Mega 2 to draw the bottom half
     showDigit(d);
     return;
   }
 
   // Mega 1 passes these straight on to Mega 2 (before doing them itself)
   if (BOARD_ID == 1) {
-    const char *forward = "hfubc";
+    const char *forward = "hfubcpo";
     const char *q = strchr(forward, c);
     if (q) sendLinkPulse(130 + (q - forward) * 10UL);
   }
 
   switch (c) {
     case 'h': homeAll(); break;
-    case 'c': paused = true; calibrateAll(); break;
+    case 'c':
+      paused = true;
+      calibrateAll();
+      break;
     case 'd': printCalibration(); break;
-    case 's': paused = true; monitorSensors(); break;
-    case 'b': paused = true; Serial.println("Box"); moveHandsTo(BOX_DEGREES); break;
-    case 'u': paused = true; Serial.println("All hands up"); moveHandsTo(UP_DEGREES); break;
+    case 's':
+      paused = true;
+      monitorSensors();
+      break;
+    case 'b':
+      paused = true;
+      Serial.println("Box");
+      moveHandsTo(BOX_DEGREES);
+      break;
+    case 'u':
+      paused = true;
+      Serial.println("All hands up");
+      moveHandsTo(UP_DEGREES);
+      break;
+    case 'o':
+      paused = true;
+      inPattern = false;
+      Serial.println("Pattern start - six boxes");
+      moveHandsTo(PATTERN_START);
+      break;
+
+    case 'm':
+      paused = true;
+      showMode(hand > 0 ? hand : 3);
+      break;
 
     case 'z':
       paused = true;
@@ -1205,7 +1360,10 @@ void handleCommand(String line) {
 
     case 'k':
       paused = true;
-      if (hand < 1 || hand > NUM_HANDS) { Serial.println("Usage: k <hand 1-24>"); break; }
+      if (hand < 1 || hand > NUM_HANDS) {
+        Serial.println("Usage: k <hand 1-24>");
+        break;
+      }
       dirFinder(hand - 1);
       break;
 
@@ -1225,30 +1383,34 @@ void handleCommand(String line) {
       else testHands(-1);
       break;
 
-    case 'w': {
-      paused = true;
-      homed = false;                // hands end up 90° on, so positions are no longer known
-      float degrees = value != 0 ? value : 90;
-      bool finished = true;
-      if (BOARD_ID == 1 && hand > NUM_HANDS) Serial.println("Hands 25-48 are on Mega 2");
-      else finished = wiringCheck(hand >= 1 && hand <= NUM_HANDS ? hand - 1 : 0, degrees);
-      if (finished) signalMega2(degrees);   // Mega 1 only: Mega 2 carries on with 25-48
-      break;
-    }
+    case 'w':
+      {
+        paused = true;
+        homed = false;  // hands end up 90° on, so positions are no longer known
+        float degrees = value != 0 ? value : 90;
+        bool finished = true;
+        if (BOARD_ID == 1 && hand > NUM_HANDS) Serial.println("Hands 25-48 are on Mega 2");
+        else finished = wiringCheck(hand >= 1 && hand <= NUM_HANDS ? hand - 1 : 0, degrees);
+        if (finished) signalMega2(degrees);  // Mega 1 only: Mega 2 carries on with 25-48
+        break;
+      }
 
     case 'x':
       paused = true;
-      crosstalkTest();              // full turns, so hands end where they started
+      crosstalkTest();  // full turns, so hands end where they started
       break;
 
     case 'v':
       paused = true;
-      sensorSweep();                // hands end where they started (full turns)
+      sensorSweep();  // hands end where they started (full turns)
       break;
 
     case 'j':
       paused = true;
-      if (hand < 1 || hand > NUM_HANDS || space < 0) { Serial.println("Usage: j <hand 1-24> <degrees, - = CCW>"); break; }
+      if (hand < 1 || hand > NUM_HANDS || space < 0) {
+        Serial.println("Usage: j <hand 1-24> <degrees, - = CCW>");
+        break;
+      }
       printHand(hand - 1);
       Serial.print(": jog ");
       Serial.println(value, 1);
@@ -1256,8 +1418,14 @@ void handleCommand(String line) {
       break;
 
     case 'n':
-      if (!calibrated) { Serial.println("Not calibrated yet - type c"); break; }
-      if (hand < 1 || hand > NUM_HANDS || space < 0) { Serial.println("Usage: n <hand 1-24> <degrees, + = further CW>"); break; }
+      if (!calibrated) {
+        Serial.println("Not calibrated yet - type c");
+        break;
+      }
+      if (hand < 1 || hand > NUM_HANDS || space < 0) {
+        Serial.println("Usage: n <hand 1-24> <degrees, + = further CW>");
+        break;
+      }
       homeDegrees[hand - 1] += value;
       if (homeDegrees[hand - 1] < 0) homeDegrees[hand - 1] += 360;
       if (homeDegrees[hand - 1] >= 360) homeDegrees[hand - 1] -= 360;
@@ -1269,7 +1437,10 @@ void handleCommand(String line) {
       break;
 
     case 'p':
-      if (!homed) { Serial.println("Not homed - type h first"); break; }
+      if (!homed) {
+        Serial.println("Not homed - type h first");
+        break;
+      }
       paused = !paused;
       Serial.println(paused ? "Pattern paused" : "Pattern running");
       break;
@@ -1287,21 +1458,30 @@ void handleCommand(String line) {
     case 'f':
       paused = true;
       disableSteppers();
-      homed = false;                // hands may be moved by hand, so positions are unknown
+      homed = false;  // hands may be moved by hand, so positions are unknown
       Serial.println("Motors off - hands can be turned by hand. Type h to home again.");
       break;
 
     default:
-      Serial.println("Commands: h c d n j w v x r t s y a k z b u p f 0-9 (see the top of the sketch)");
+      Serial.println("Commands: h c d n j w v x r t s y a k z m b u o p f 0-9 (see the top of the sketch)");
   }
 }
 
 // ================= SETUP =================
 void setup() {
-  pinMode(EN_PIN, INPUT_PULLUP);    // EN released (see EN_PIN)
-  if (BOARD_ID == 1) { pinMode(LINK_PIN, OUTPUT); digitalWrite(LINK_PIN, LOW); }
-  else { pinMode(LINK_PIN, INPUT); attachInterrupt(digitalPinToInterrupt(LINK_PIN), linkISR, CHANGE); }
-  disableSteppers();                // motors off until a run starts
+  pinMode(EN_PIN, INPUT_PULLUP);  // EN released (see EN_PIN)
+  if (BOARD_ID == 1) {
+    pinMode(LINK_PIN, OUTPUT);
+    digitalWrite(LINK_PIN, LOW);
+  } else {
+    pinMode(LINK_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(LINK_PIN), linkISR, CHANGE);
+  }
+  if (BOARD_ID == 1) {
+    Wire.begin(I2C_ADDRESS);
+    Wire.onReceive(onI2CReceive);
+  }
+  disableSteppers();  // motors off until a run starts
   setupPins();
 
   Serial.begin(9600);
@@ -1320,10 +1500,46 @@ void setup() {
 }
 
 // ================= LOOP =================
+// I2C interrupt: just stores the message for checkI2C()
+void onI2CReceive(int count) {
+  if (count < 2) {
+    while (Wire.available()) Wire.read();
+    return;
+  }
+  char type = Wire.read();
+  char value = Wire.read();
+  while (Wire.available()) Wire.read();
+  if (type == 'D' && value >= 0 && value <= 9) i2cDigit = value;
+  else if (type == 'C') i2cCommand = value;
+}
+
+// Acts on the last message from the ESP32 (outside the interrupt, as the
+// moves take seconds). A newer digit replaces one not yet shown.
+void checkI2C() {
+  if (BOARD_ID != 1) return;
+  noInterrupts();
+  int d = i2cDigit;
+  i2cDigit = -1;
+  char c = i2cCommand;
+  i2cCommand = 0;
+  interrupts();
+  if (c) {
+    Serial.print("ESP32 says: ");
+    Serial.println(c);
+    handleCommand(String(c));
+  }
+  if (d >= 0) {
+    Serial.print("ESP32 says: digit ");
+    Serial.println(d);
+    handleCommand(String((char)('0' + d)));  // shows it here and on Mega 2
+  }
+}
+
 void loop() {
   if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
 
-  checkLink();                      // Mega 2: start when Mega 1 says so
+  checkLink();  // Mega 2: start when Mega 1 says so
+  checkI2C();   // Mega 1: digit or command from the ESP32
 
   if (paused || !homed) return;
   patternStep();
