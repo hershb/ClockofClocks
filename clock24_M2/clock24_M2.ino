@@ -45,7 +45,7 @@
 //   u            all hands up
 //   0 - 9        show that digit (on Mega 1 this also tells Mega 2 to draw the bottom half)
 //                h f u b c on Mega 1 are also passed on to Mega 2
-//   z            count 0-9, 1 s between digits (z 500 = 0.5 s); any key stops
+//   z            count 0-9, 2 s between digits (z 500 = 0.5 s); any key stops
 //   p            start / pause the continuous pattern
 //   f            free the motors so hands can be turned by hand
 // Angles: 0 = up, 90 = right, 180 = down, 270 = left.
@@ -137,11 +137,11 @@ const int16_t DIGITS[10][NUM_HANDS] PROGMEM = {     // stored in flash, not RAM
   /* 2 */                      {180,  0, 180, 90,  90,270, 270,  0,   0,180,   0, 90,  90,270, 270,180,  90,  0, 270, 90,  90,270, 270,  0 },   // 180 deg rotation of the top half
   /* 3 */                      { 90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // mirror of the top half
   /* 4 */                      {  90,  0, 270, 90, 180,270, 180,  0, 225,225, 225,225,   0,180,   0,180, 225,225, 225,225,  90,  0, 270,  0 },   // middle bar, then right column ends
-  /* 5 */                      {  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90, 270,  0,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // middle bar, right column, bottom bar
+  /* 5 */                      {  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // middle bar, right column, bottom bar
   /* 6 */                      { 180,  0,  90,180, 270,180, 180,  0,   0,180,  90,  0, 270,  0,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // closed bottom loop
   /* 7 */                      { 225,225, 225,225, 180,  0, 180,  0, 225,225, 225,225,   0,180,   0,180, 225,225, 225,225,  90,  0, 270,  0 },   // bottom half same as 1
   /* 8 */                      { 180, 45,  90,180, 270,180, 180,315,   0,180,  90,  0, 270,  0,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // like 6, with waist hands 26/32 angled in
-  /* 9 */                      {  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90, 270,  0,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // bottom half same as 5
+  /* 9 */                      {  90,  0, 270, 90, 180,270, 180,  0,  90,180, 270, 90,   0,270,   0,180,  90,  0, 270, 90,  90,270, 270,  0 },   // bottom half same as 5
 };
 const bool DIGIT_DEFINED[10] = { true, true, true, true, true, true, true, true, true, true };
 
@@ -1209,7 +1209,7 @@ void handleCommand(String line) {
 
     case 'z':
       paused = true;
-      countUp(hand > 0 ? hand : 1000);
+      countUp(hand > 0 ? hand : 2000);
       break;
 
     case 'k':
