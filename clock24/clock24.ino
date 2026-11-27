@@ -22,6 +22,7 @@
 //                then a min/max voltage summary for every sensor
 //   w 9          wiring check starting from hand 9
 //   w 1 360      full turn per hand, so every hand passes its sensor
+//   w 1 -360     same but CCW - a hand that goes CW instead has a DIR fault
 //   v            fast sensor sweep (~3 s): all top hands turn once together, then all
 //                bottom hands, with background and peak voltage for every sensor
 //   x            crosstalk test: each hand turns once alone; reports any other
@@ -31,6 +32,14 @@
 //   t            test every hand in turn: should turn CW from UP to RIGHT
 //   t 5          test hand 5 only
 //   s            sensor monitor (any key to stop)
+//   y            direction test: all hands turn 90° CW together, pause, then 90° CCW back
+//   y 360        same with a full turn each way
+//   a            alternate test: odd hands (tops) 90° CCW while even hands (bottoms) go
+//                90° CW, pause, then each goes back the other way
+//   a 360        same with a full turn
+//   k 9          DIR finder for hand 9: steps it 20° 24 times, each time with only ONE
+//                DIR pin set to CCW. The pin printed when the hand goes CCW is the
+//                DIR pin its driver is really wired to
 //   b            box around the edge of the grid
 //   u            all hands up
 //   0 - 9        show that digit (top half on this Mega)
@@ -56,6 +65,12 @@ const int NUM_HANDS = NUM_PAIRS * 2;
 const uint8_t STEP_PINS[NUM_HANDS]   = {  3,  5,   7,  9,  11, 13,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  45, 43,  41, 39 };
 const uint8_t DIR_PINS[NUM_HANDS]    = {  2,  4,   6,  8,  10, 12,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  44, 42,  40, 38 };
 const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
+
+// For Mega 2
+// //                     HAND NUMBER        1   2     3   4   5   6    7   8   9   10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
+// const uint8_t STEP_PINS[NUM_HANDS]   = {  9,  11,  13,  3,  5,  7,  15, 17, 31,  33,  35,  37,  23, 25,  27, 29,  53, 51,  49, 47,  39, 41,  43, 45 };
+// const uint8_t DIR_PINS[NUM_HANDS]    = {  8,  10,  12,  2,  4,  6,  14, 16, 30,  32,  34,  36,  22, 24,  26, 28,  52, 50,  48, 46,  38, 40,  42, 44 };
+// const uint8_t SENSOR_PINS[NUM_PAIRS] = { A0, A1,  A2, A3,  A4, A5,  A8, A9, A10, A11, A12, A13 };
 
 // Change pin assignment when using the shield
 //                        HAND NUMBER        1   2    3   4    5   6    7   8    9  10   11   12   13  14   15  16   17  18   19  20   21  22   23  24
@@ -663,8 +678,8 @@ void printSensorSummary() {
 
 void wiringCheck(int first, float degrees) {
   Serial.print("Wiring check - each hand turns ");
-  Serial.print(degrees, 0);
-  Serial.println(" CW in turn. Send any key to stop.");
+  Serial.print(fabs(degrees), 0);
+  Serial.println(degrees < 0 ? " CCW in turn. Send any key to stop." : " CW in turn. Send any key to stop.");
   while (Serial.available()) Serial.read();
 
   for (int p = 0; p < NUM_PAIRS; p++) {
@@ -684,10 +699,10 @@ void wiringCheck(int first, float degrees) {
     Serial.println(SENSOR_PINS[p] - A0);
 
     // Move in 1° pieces, reading this clock's sensor after each one
-    long total = degreesToSteps(degrees);
+    long total = degreesToSteps(fabs(degrees));
     long s[NUM_HANDS] = { 0 };
     for (long done = 0; done < total; done += WIRING_SAMPLE_STEPS) {
-      s[m] = min(WIRING_SAMPLE_STEPS, total - done);
+      s[m] = min(WIRING_SAMPLE_STEPS, total - done) * (degrees < 0 ? -1 : 1);
       moveStepsAt(s, WIRING_CHECK_TICK_US);
 
       float v = readSensorVolts(p);
@@ -728,11 +743,12 @@ void sensorSweep() {
   const int MAX_ZONES = 4;
   static int16_t zoneStart[2][NUM_PAIRS][MAX_ZONES], zoneEnd[2][NUM_PAIRS][MAX_ZONES];
   static uint8_t zoneCount[2][NUM_PAIRS];
+  static bool everClear[2][NUM_PAIRS];          // false = sensor stayed ON for the whole turn
   bool inZone[NUM_PAIRS];
 
   for (int layer = 0; layer < 2; layer++) {        // 0 = top hands, 1 = bottom hands
     long s[NUM_HANDS] = { 0 };
-    for (int p = 0; p < NUM_PAIRS; p++) { zoneCount[layer][p] = 0; inZone[p] = false; }
+    for (int p = 0; p < NUM_PAIRS; p++) { zoneCount[layer][p] = 0; inZone[p] = false; everClear[layer][p] = false; }
 
     for (long done = 0; done < STEPS_PER_REV; done += WIRING_SAMPLE_STEPS) {
       for (int p = 0; p < NUM_PAIRS; p++) s[p * 2 + layer] = WIRING_SAMPLE_STEPS;
@@ -746,6 +762,7 @@ void sensorSweep() {
 
         int16_t angle = (int16_t)(handPos[p * 2 + layer] * 360L / STEPS_PER_REV);
         bool det = sensorDetected(p);
+        if (!det) everClear[layer][p] = true;
         uint8_t &n = zoneCount[layer][p];
         if (det && !inZone[p] && n < MAX_ZONES) { zoneStart[layer][p][n] = angle; zoneEnd[layer][p][n] = angle; n++; }
         if (det && n > 0) zoneEnd[layer][p][n - 1] = angle;
@@ -790,6 +807,7 @@ void sensorSweep() {
       Serial.print("): ");
       uint8_t n = zoneCount[layer][p];
       if (n == 0) Serial.print("never");
+      if (n > 0 && !everClear[layer][p]) { Serial.print("ON the whole turn - sensor never cleared (stuck high: light or wiring)"); n = 0; }
       for (int z = 0; z < n; z++) {
         if (z) Serial.print(", ");
         Serial.print(zoneStart[layer][p][z]);
@@ -809,6 +827,82 @@ void sensorSweep() {
   }
 }
 
+// ================= DIRECTION TEST =================
+// All hands turn CW together, pause 1 s, then CCW back to where they started.
+// Any hand going the wrong way (or the same way both times = DIR not reaching
+// the driver) stands out. Works before homing; positions are unchanged after.
+void directionTest(float degrees) {
+  long s[NUM_HANDS];
+  long n = degreesToSteps(degrees);
+  Serial.print("Direction test - all hands ");
+  Serial.print(degrees, 0);
+  Serial.println(" deg CW...");
+  for (int m = 0; m < NUM_HANDS; m++) s[m] = n;
+  moveStepsAt(s, PATTERN_TICK_US);
+  delay(1000);
+  Serial.println("...now CCW back");
+  for (int m = 0; m < NUM_HANDS; m++) s[m] = -n;
+  moveStepsAt(s, PATTERN_TICK_US);
+  Serial.println("Direction test done");
+  if (!HOLD_POSITION) disableSteppers();
+}
+
+// Odd hands (1, 3, 5... = top hands) turn CCW while even hands turn CW, then
+// both reverse back. Half the DIR pins are high and half low, so any DIR line
+// that is joined to another (or driven by the wrong pin) shows up as a hand
+// going the wrong way. Works before homing; positions are unchanged after.
+void alternateTest(float degrees) {
+  long s[NUM_HANDS];
+  long n = degreesToSteps(degrees);
+  Serial.print("Alternate test - odd hands (tops) ");
+  Serial.print(degrees, 0);
+  Serial.println(" deg CCW, even hands (bottoms) CW...");
+  for (int m = 0; m < NUM_HANDS; m++) s[m] = (m % 2 == 0) ? -n : n;   // m 0 = hand 1 (odd)
+  moveStepsAt(s, PATTERN_TICK_US);
+  delay(1000);
+  Serial.println("...now back: odd hands CW, even hands CCW");
+  for (int m = 0; m < NUM_HANDS; m++) s[m] = -s[m];
+  moveStepsAt(s, PATTERN_TICK_US);
+  Serial.println("Alternate test done");
+  if (!HOLD_POSITION) disableSteppers();
+}
+
+// DIR finder: which Mega pin really sets this hand's direction? For each of
+// the 24 DIR pins in turn, that pin alone is set to CCW (all others CW) and
+// the hand steps 20°. It turns CW every time except for the pin its driver is
+// actually wired to. Hand positions are lost afterwards (home again).
+void dirFinder(int m) {
+  printHand(m);
+  Serial.print(": DIR finder. Code expects DIR pin ");
+  Serial.print(DIR_PINS[m]);
+  Serial.println(". Watch the hand - note the pin printed when it goes CCW. Any key stops.");
+  while (Serial.available()) Serial.read();
+  homed = false;
+  enableSteppers();
+  long n = degreesToSteps(20);
+  for (int k = 0; k < NUM_HANDS; k++) {
+    for (int j = 0; j < NUM_HANDS; j++) setDirection(j, j != k);   // only DIR k = CCW
+    delayMicroseconds(20);
+    Serial.print("  only DIR pin ");
+    Serial.print(DIR_PINS[k]);
+    Serial.print(" (hand ");
+    Serial.print(k + 1);
+    Serial.println(") set CCW");
+    unsigned long lastTick = micros();
+    for (long i = 0; i < n; i++) {
+      while (micros() - lastTick < PATTERN_TICK_US) {}
+      lastTick = micros();
+      stepHigh(m);
+      delayMicroseconds(3);
+      stepLow(m);
+    }
+    delay(1500);
+    if (Serial.available()) { while (Serial.available()) Serial.read(); Serial.println("DIR finder stopped"); break; }
+  }
+  Serial.println("DIR finder done - home again (h) before using shapes");
+  if (!HOLD_POSITION) disableSteppers();
+}
+
 // ================= CROSSTALK TEST =================
 // Turns each hand one full turn on its own while every other hand stays still,
 // and reports any OTHER clock's sensor that fires meanwhile. With correct
@@ -823,7 +917,9 @@ void crosstalkTest() {
     if (startDet[p]) {
       Serial.print("Clock ");
       Serial.print(p + 1);
-      Serial.println(" sensor already detected at the start - ignored for crosstalk");
+      Serial.print(" sensor already detected at the start (");
+      Serial.print(readSensorVolts(p), 2);
+      Serial.println(" V) - ignored for crosstalk");
     }
   }
 
@@ -831,8 +927,9 @@ void crosstalkTest() {
   unsigned long startMs = millis();
   for (int m = 0; m < NUM_HANDS; m++) {
     int own = m / 2;
-    bool ownSeen = false;
+    bool ownSeen = false, ownCleared = false;
     bool other[NUM_PAIRS] = { false };
+    float ownMin = 99, ownMax = 0;        // own sensor voltage range during the turn
 
     // Steps just this one hand (much faster than the all-hands move routine),
     // checking every sensor after each step. A full turn, so handPos is unchanged.
@@ -846,15 +943,29 @@ void crosstalkTest() {
       stepHigh(m);
       delayMicroseconds(3);
       stepLow(m);
+      if ((i & 15) == 0) {                // analog read is slow - sample every 16 steps (0.5 deg)
+        float v = readSensorVolts(own);
+        if (v < ownMin) ownMin = v;
+        if (v > ownMax) ownMax = v;
+      }
       for (int p = 0; p < NUM_PAIRS; p++) {
-        if (!sensorDetected(p)) continue;
+        if (!sensorDetected(p)) { if (p == own) ownCleared = true; continue; }
         if (p == own) ownSeen = true;
         else if (!startDet[p]) other[p] = true;
       }
     }
 
     printHand(m);
-    Serial.print(ownSeen ? ": own sensor OK" : ": own sensor NOT seen");
+    bool ownOK = ownSeen && ownCleared;
+    if (!ownSeen)        Serial.print(": own sensor NOT seen  ");
+    else if (!ownCleared) Serial.print(": own sensor NEVER CLEARED (stuck high)");
+    else                 Serial.print(": own sensor OK        ");
+    Serial.print("   ");
+    Serial.print(ownMin, 2);
+    Serial.print(" - ");
+    Serial.print(ownMax, 2);
+    Serial.print(" V");
+    if (ownMin > 1.0) Serial.print("  <- high background");
     bool cross = false;
     for (int p = 0; p < NUM_PAIRS; p++) {
       if (!other[p]) continue;
@@ -864,7 +975,7 @@ void crosstalkTest() {
       cross = true;
     }
     if (cross) Serial.print("   <- CROSSTALK");
-    if (cross || !ownSeen) problems++;
+    if (cross || !ownOK) problems++;
     Serial.println();
   }
   Serial.println(problems ? "Problems found - see above." : "No crosstalk - every sensor only sees its own hands.");
@@ -968,6 +1079,22 @@ void handleCommand(String line) {
     case 'b': paused = true; Serial.println("Box"); moveHandsTo(BOX_DEGREES); break;
     case 'u': paused = true; Serial.println("All hands up"); moveHandsTo(UP_DEGREES); break;
 
+    case 'k':
+      paused = true;
+      if (hand < 1 || hand > NUM_HANDS) { Serial.println("Usage: k <hand 1-24>"); break; }
+      dirFinder(hand - 1);
+      break;
+
+    case 'a':
+      paused = true;
+      alternateTest(hand > 0 ? hand : 90);
+      break;
+
+    case 'y':
+      paused = true;
+      directionTest(hand > 0 ? hand : 90);
+      break;
+
     case 't':
       paused = true;
       if (hand >= 1 && hand <= NUM_HANDS) testHands(hand - 1);
@@ -977,7 +1104,7 @@ void handleCommand(String line) {
     case 'w':
       paused = true;
       homed = false;                // hands end up 90° on, so positions are no longer known
-      wiringCheck(hand >= 1 && hand <= NUM_HANDS ? hand - 1 : 0, value > 0 ? value : 90);
+      wiringCheck(hand >= 1 && hand <= NUM_HANDS ? hand - 1 : 0, value != 0 ? value : 90);
       break;
 
     case 'x':
@@ -1036,7 +1163,7 @@ void handleCommand(String line) {
       break;
 
     default:
-      Serial.println("Commands: h c d n j w v x r t s b u p f 0-9 (see the top of the sketch)");
+      Serial.println("Commands: h c d n j w v x r t s y a k b u p f 0-9 (see the top of the sketch)");
   }
 }
 
